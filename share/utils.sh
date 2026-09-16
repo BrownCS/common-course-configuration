@@ -39,51 +39,32 @@ log_error() {
 }
 
 # Container detection
-is_ccc_container() {
+is_container_environment() {
   [[ -f /etc/ccc-container ]]
 }
 
 # Configuration file management
+# Single source of truth: use the same config path as config.sh.
 get_config_dir() {
-  echo "$HOME/.config/ccc"
-}
-
-get_config_file() {
-  echo "$(get_config_dir)/config"
+  resolve_config_dir 2>/dev/null || echo "$HOME/.config/ccc"
 }
 
 get_settings_file() {
-  echo "$(get_config_dir)/settings"
+  get_config_file 2>/dev/null || echo "$(get_config_dir)/config"
 }
 
-save_courses_dir() {
-  local courses_dir="$1"
-  local config_dir="$(get_config_dir)"
-  local config_file="$(get_config_file)"
-
-  # Ensure config directory exists
-  mkdir -p "$config_dir"
-
-  # Convert to absolute path
-  courses_dir="$(realpath "$courses_dir")"
-
-  # Save to config file
-  echo "COURSES_DIR=$courses_dir" >"$config_file"
-}
-
-load_courses_dir() {
-  local config_file="$(get_config_file)"
-
-  if [[ -f "$config_file" ]]; then
-    # Source the config and return the courses directory
-    source "$config_file"
-    echo "$COURSES_DIR"
-  fi
-}
-
-has_courses_config() {
-  local config_file="$(get_config_file)"
-  [[ -f "$config_file" ]] && grep -q "^COURSES_DIR=" "$config_file"
+detect_upgrade_mode() {
+  case "${SCRIPT_DIR:-}" in
+    /usr/local/share/ccc|/usr/local/bin/*)
+      printf '%s\n' "system"
+      ;;
+    "$HOME/.local/share/ccc"|"$HOME/.local/bin"/*)
+      printf '%s\n' "user"
+      ;;
+    *)
+      printf '%s\n' "user"
+      ;;
+  esac
 }
 
 # Version management
@@ -130,7 +111,6 @@ version_compare() {
 # Get latest version from GitHub releases
 get_latest_version() {
   local repo_url="$CCC_UPDATE_API_URL"
-
   if command -v curl >/dev/null 2>&1; then
     curl -s "$repo_url" 2>/dev/null | grep '"tag_name"' | sed 's/.*"v\?\([^"]*\)".*/\1/' 2>/dev/null
   elif command -v wget >/dev/null 2>&1; then
@@ -143,6 +123,8 @@ get_latest_version() {
 
 # Self-update functionality using installer
 update_self() {
+  # first, compare current and local verisons
+  local install_mode="${1:-user}"
   echo "Checking for CCC updates..."
 
   local current_version="$(get_version)"
@@ -160,40 +142,75 @@ update_self() {
     echo "Already up to date"
     return 0
   fi
-
+  # get tarball from github repo, make temp dir, run install.sh
   echo "Newer version available: $latest_version"
-  echo "Downloading and running installer..."
+  echo "Downloading release archive and running installer..."
 
-  # Download installer
-  local installer_url="https://raw.githubusercontent.com/$CCC_UPDATE_REPO/v${latest_version}/install.sh"
-  local tmp_installer=$(mktemp)
+  local tarball_url="https://github.com/$CCC_UPDATE_REPO/archive/refs/tags/v${latest_version}.tar.gz"
+  local tmp_tar=$(mktemp)
+  local tmpdir=$(mktemp -d)
 
   if command -v curl >/dev/null 2>&1; then
-    if ! curl -sSfL "$installer_url" -o "$tmp_installer"; then
-      echo_error "Failed to download installer"
-      rm -f "$tmp_installer"
+    if ! curl -sSfL "$tarball_url" -o "$tmp_tar"; then
+      echo_error "Failed to download release archive"
+      rm -f "$tmp_tar"
+      rm -rf "$tmpdir"
       return 1
     fi
   elif command -v wget >/dev/null 2>&1; then
-    if ! wget -q "$installer_url" -O "$tmp_installer"; then
-      echo_error "Failed to download installer"
-      rm -f "$tmp_installer"
+    if ! wget -q -O "$tmp_tar" "$tarball_url"; then
+      echo_error "Failed to download release archive"
+      rm -f "$tmp_tar"
+      rm -rf "$tmpdir"
       return 1
     fi
   else
     echo_error "Neither curl nor wget available"
-    rm -f "$tmp_installer"
+    rm -f "$tmp_tar"
+    rm -rf "$tmpdir"
     return 1
   fi
 
-  # Run installer
-  chmod +x "$tmp_installer"
+  # Extract into temporary directory
+  if ! tar -xzf "$tmp_tar" -C "$tmpdir"; then
+    echo_error "Failed to extract release archive"
+    rm -f "$tmp_tar"
+    rm -rf "$tmpdir"
+    return 1
+  fi
+
+  rm -f "$tmp_tar"
+
+  # Find extracted directory and run its install.sh
+  local extracted_dir
+  extracted_dir=$(find "$tmpdir" -maxdepth 1 -mindepth 1 -type d | head -n1)
+  if [[ -z "$extracted_dir" ]] || [[ ! -f "$extracted_dir/install.sh" ]]; then
+    echo_error "Installer not found in release archive"
+    rm -rf "$tmpdir"
+    return 1
+  fi
+
+  # run install.sh with proper mode (user or system)
+  # this is either inferred in ccc or explicitly given
+  chmod +x "$extracted_dir/install.sh"
   echo "Running installer for version $latest_version..."
-  "$tmp_installer"
+  if [[ "$install_mode" == "system" ]]; then
+    if [[ $EUID -eq 0 ]]; then
+      (cd "$extracted_dir" && ./install.sh --system)
+    elif command -v sudo >/dev/null 2>&1; then
+      (cd "$extracted_dir" && sudo ./install.sh --system)
+    else
+      echo_error "System upgrade requested but sudo is not available"
+      rm -rf "$tmpdir"
+      return 1
+    fi
+  else
+    (cd "$extracted_dir" && ./install.sh --user)
+  fi
   local install_result=$?
 
   # Cleanup
-  rm -f "$tmp_installer"
+  rm -rf "$tmpdir"
 
   if [[ $install_result -eq 0 ]]; then
     echo "Successfully updated to version $latest_version"
@@ -210,9 +227,9 @@ load_settings() {
   CCC_NETWORK_NAME="${CCC_NETWORK_NAME:-net-ccc}"
   CCC_DEFAULT_BASE_IMAGE="${CCC_DEFAULT_BASE_IMAGE:-ubuntu:noble}"
   CCC_MOUNT_PATH="${CCC_MOUNT_PATH:-/courses}"
-  CCC_UPDATE_REPO="${CCC_UPDATE_REPO:-BrownCS/common-course-containers}"
+  CCC_UPDATE_REPO="${CCC_UPDATE_REPO:-BrownCS/common-course-configuration}"
 
-  # Load user settings if they exist (only on host, not in container)
+  # Load user config if it exists (single config file). This is shared with config.sh.
   local settings_file="$(get_settings_file)"
   if [[ -f "$settings_file" ]]; then
     source "$settings_file"
@@ -229,7 +246,7 @@ create_default_settings() {
   # Ensure config directory exists
   mkdir -p "$config_dir"
 
-  # Create default settings file if it doesn't exist
+  # Create default config file if it doesn't exist.
   if [[ ! -f "$settings_file" ]]; then
     cat > "$settings_file" << 'EOF'
 # CCC Settings Configuration
@@ -242,7 +259,7 @@ CCC_DEFAULT_BASE_IMAGE=ubuntu:noble
 CCC_MOUNT_PATH=/courses
 
 # Update Repository
-CCC_UPDATE_REPO=BrownCS/common-course-containers
+CCC_UPDATE_REPO=BrownCS/common-course-configuration
 
 # Uncomment and modify any settings you want to customize
 # CCC_IMAGE_PREFIX=my-ccc
@@ -253,7 +270,7 @@ EOF
   fi
 }
 
-# Auto-load settings when utils is sourced (host mode only)
-if ! is_ccc_container; then
+# Auto-load settings for host-side execution only.
+if ! is_container_environment; then
   load_settings
 fi

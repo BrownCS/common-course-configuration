@@ -51,17 +51,17 @@ done
 if [[ "$INSTALL_MODE" == "system" ]]; then
     BIN_DIR="/usr/local/bin"
     SHARE_DIR="/usr/local/share/ccc"
-    SEARCH_PATH="/usr/local/share/ccc"
+    # SEARCH_PATH="/usr/local/share/ccc"
 else
     BIN_DIR="$HOME/.local/bin"
     SHARE_DIR="$HOME/.local/share/ccc"
-    SEARCH_PATH="$HOME/.local/share/ccc"
+    # SEARCH_PATH="$HOME/.local/share/ccc"
 fi
 
 MAIN_SCRIPT="$BIN_DIR/ccc"
 
 # Source logging functions from utils
-source "$REPO_DIR/lib/utils.sh"
+source "$REPO_DIR/share/utils.sh"
 
 # Check permissions based on installation mode
 check_permissions() {
@@ -96,14 +96,9 @@ check_dependencies() {
     fi
 
     # Check for git (used by courses)
+    # this is used by CCC to clone/pull courses, so we keep it
     if ! command -v git >/dev/null 2>&1; then
         missing_deps+=("git")
-    fi
-
-    # Check for direnv (used by courses)
-    if ! command -v direnv >/dev/null 2>&1; then
-        log_warning "direnv not found - course environments may not work properly"
-        echo "  Install with: sudo apt install direnv  # or brew install direnv"
     fi
 
     if [[ ${#missing_deps[@]} -gt 0 ]]; then
@@ -131,14 +126,14 @@ validate_source() {
     log_info "Validating source files..."
 
     local required_files=(
-        "ccc.sh"
-        "registry.csv"
-        "Dockerfile.template"
+        "bin/ccc"
+        "share/registry.csv"
         "VERSION"
+        "share/Dockerfile.template"
     )
 
     local required_dirs=(
-        "lib"
+        "share"
     )
 
     for file in "${required_files[@]}"; do
@@ -157,9 +152,9 @@ validate_source() {
         fi
     done
 
-    # Check that lib directory has shell scripts
-    if ! ls "$REPO_DIR/lib/"*.sh >/dev/null 2>&1; then
-        log_error "No shell scripts found in lib directory"
+    # Check that share directory has shell scripts
+    if ! ls "$REPO_DIR/share/"*.sh >/dev/null 2>&1; then
+        log_error "No shell scripts found in share directory"
         echo "Make sure you're running this script from the CCC repository root"
         exit 1
     fi
@@ -173,7 +168,6 @@ create_directories() {
 
     mkdir -p "$BIN_DIR"
     mkdir -p "$SHARE_DIR"
-    mkdir -p "$SHARE_DIR/lib"
 
     log_success "Installation directories created"
 }
@@ -182,20 +176,19 @@ create_directories() {
 install_files() {
     log_info "Installing CCC files..."
 
-    # Copy main script
-    cp "$REPO_DIR/ccc.sh" "$MAIN_SCRIPT"
+    # Copy main CLI from repo/bin to the install bin dir
+    cp "$REPO_DIR/bin/ccc" "$MAIN_SCRIPT"
     chmod +x "$MAIN_SCRIPT"
 
-    # Also copy ccc.sh to share directory for Docker build context
-    cp "$REPO_DIR/ccc.sh" "$SHARE_DIR/"
+    # Also copy the CLI into the share dir for bundle contexts
+    cp "$REPO_DIR/bin/ccc" "$SHARE_DIR/" 2>/dev/null || true
 
-    # Copy library files
-    cp "$REPO_DIR/lib/"*.sh "$SHARE_DIR/lib/"
-
-    # Copy registry, VERSION file, and Dockerfile template
-    cp "$REPO_DIR/registry.csv" "$SHARE_DIR/"
-    cp "$REPO_DIR/VERSION" "$SHARE_DIR/"
-    cp "$REPO_DIR/Dockerfile.template" "$SHARE_DIR/"
+    # Copy runtime scripts and static data from `share/`
+    rm -f "$SHARE_DIR"/Dockerfile.template "$SHARE_DIR"/Dockerfile.generated.* "$SHARE_DIR"/registry.csv "$SHARE_DIR"/*.sh 2>/dev/null || true
+    cp "$REPO_DIR/share/"*.sh "$SHARE_DIR/" 2>/dev/null || true
+    cp "$REPO_DIR/share/registry.csv" "$SHARE_DIR/" 2>/dev/null || true
+    cp "$REPO_DIR/VERSION" "$SHARE_DIR/" 2>/dev/null || true
+    cp "$REPO_DIR/share/Dockerfile.template" "$SHARE_DIR/" 2>/dev/null || true
 
     # Script already has path detection built-in, no modification needed
 
@@ -275,26 +268,16 @@ show_post_install_info() {
     fi
 
     echo "Next steps:"
-    echo "1. Initialize your courses directory:"
-    echo -e "   ${GREEN}ccc init${RESET}"
-    echo ""
-    echo "2. Setup a course:"
-    echo -e "   ${GREEN}ccc setup <course-name>${RESET}"
-    echo ""
-    echo "3. Run a course container:"
-    echo -e "   ${GREEN}ccc run <course-name>${RESET}"
-    echo ""
-    echo "4. View available courses:"
-    echo -e "   ${GREEN}ccc${RESET} (shows usage and available courses)"
-    echo ""
-    echo -e "For help: ${GREEN}ccc --help${RESET} or check the documentation"
+    echo "  - Initialize your courses directory and update preferences:    ccc init"
+    echo "  - Then open a course environment with ccc open [course id]"
+    echo "  - See README.md or DOCS.md for full usage and additional commands"
     echo ""
     echo "To uninstall: run the uninstall script from the repository"
 }
 
 # Main installation function
 main() {
-    echo "CCC (Common Course Containers) Installer v$VERSION"
+    echo "CCC (Common Course Configuration) Installer v$VERSION"
     echo "=============================================="
     echo ""
 

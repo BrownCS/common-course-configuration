@@ -34,7 +34,8 @@ MAIN_SCRIPT="$BIN_DIR/ccc"
 
 # Source logging functions from utils
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$REPO_DIR/lib/utils.sh"
+source "$REPO_DIR/share/utils.sh"
+source "$REPO_DIR/share/config.sh"
 
 # Check permissions based on detected installation
 check_permissions() {
@@ -101,34 +102,43 @@ remove_files() {
         log_success "Removed $SHARE_DIR"
     fi
 
-    # Handle courses directory and configuration
-    local courses_dir=""
-    if [[ "$INSTALL_MODE" == "user" ]] && [[ -f "$HOME/.config/ccc/config" ]]; then
-        # Read courses directory from config
-        source "$HOME/.config/ccc/config" 2>/dev/null || true
-        courses_dir="${COURSES_DIR:-}"
-
-        # Ask user about courses directory
-        if [[ -n "$courses_dir" ]] && [[ -d "$courses_dir" ]]; then
-            echo ""
-            log_warning "Found courses directory: $courses_dir"
-            echo "This contains your course files and data."
-            read -p "Remove courses directory? [y/N] " -n 1 -r
-            echo
-            if [[ $REPLY =~ ^[Yy]$ ]]; then
-                rm -rf "$courses_dir"
-                log_success "Removed courses directory: $courses_dir"
-            else
-                log_info "Kept courses directory: $courses_dir"
-            fi
+    # Remove shell PATH edits added by the installer for user-local installs.
+    if [[ "$INSTALL_MODE" == "user" ]]; then
+        local shell_profile=""
+        if [[ -n "${ZSH_VERSION:-}" ]] || [[ "$SHELL" == *"zsh"* ]]; then
+            shell_profile="$HOME/.zshrc"
+        elif [[ -n "${BASH_VERSION:-}" ]] || [[ "$SHELL" == *"bash"* ]]; then
+            shell_profile="$HOME/.bashrc"
+        else
+            shell_profile="$HOME/.profile"
         fi
 
-        # Remove configuration files
-        rm -f "$HOME/.config/ccc/config"
-        rm -f "$HOME/.config/ccc/settings"
-        # Remove directory if empty
-        rmdir "$HOME/.config/ccc" 2>/dev/null || true
-        log_success "Removed CCC configuration"
+        if [[ -f "$shell_profile" ]]; then
+            local tmp_profile="${shell_profile}.ccc-uninstall"
+            awk '
+                BEGIN { skip = 0 }
+                /^# Added by CCC installer$/ { skip = 1; next }
+                skip == 1 && /^export PATH="\$HOME\/\.local\/bin:\$PATH"$/ { skip = 0; next }
+                { print }
+            ' "$shell_profile" >"$tmp_profile" && mv "$tmp_profile" "$shell_profile"
+            log_success "Removed CCC PATH entry from $shell_profile"
+        fi
+
+        # Remove configuration files from both the resolved CCC config directory
+        # and the legacy ~/.config/ccc location used by older installs.
+        local cfg_dirs=("$(resolve_config_dir)" "$HOME/.config/ccc")
+        local cfg_dir=""
+        local removed_config=false
+        for cfg_dir in "${cfg_dirs[@]}"; do
+            if [[ -n "$cfg_dir" ]] && [[ -d "$cfg_dir" ]]; then
+                rm -f "$cfg_dir/config" "$cfg_dir/settings" "$cfg_dir/default-container-courses.txt"
+                rmdir "$cfg_dir" 2>/dev/null || true
+                removed_config=true
+            fi
+        done
+        if [[ "$removed_config" == true ]]; then
+            log_success "Removed CCC configuration"
+        fi
     fi
 }
 
@@ -151,7 +161,7 @@ show_post_uninstall_info() {
     if [[ "$INSTALL_MODE" == "user" ]]; then
         echo "What was removed:"
         echo "• CCC executable and files"
-        echo "• CCC configuration (~/.config/ccc/config)"
+        echo "• CCC configuration"
         echo ""
         echo "What was NOT removed (if you want to clean these up manually):"
         echo "• Course directories (user data)"
@@ -159,7 +169,7 @@ show_post_uninstall_info() {
     else
         echo "What was NOT removed (if you want to clean these up manually):"
         echo "• Course directories (user data)"
-        echo "• User configurations in ~/.config/ccc/ (per-user)"
+        echo "• User configurations (per-user)"
         echo "• Podman containers and images"
     fi
     echo ""
